@@ -89,7 +89,7 @@ def discover(sock, session=None, process_tree=None):
     return result
 
 
-def jump(db, pane, client=None, foreground=True):
+def jump(db, pane, client=None, foreground=True, acknowledge=True):
     sock = pane['socket']
     clients_fmt = SEP.join(['#{client_name}', '#{client_session}', '#{client_activity}', '#{client_tty}'])
     clients = []
@@ -107,6 +107,8 @@ def jump(db, pane, client=None, foreground=True):
     tmux(sock, 'switch-client', '-c', selected[0], '-t', pane['session_id'])
     tmux(sock, 'select-window', '-t', pane['window_id'])
     tmux(sock, 'select-pane', '-t', pane['pane_id'])
-    with db:
-        db.execute('UPDATE events SET acknowledged=? WHERE socket=? AND pane=?',
-                   (time.time(), sock, pane['pane_id']))
+    if acknowledge:
+        with db:
+            db.execute('UPDATE events SET acknowledged=? WHERE socket=? AND pane=?',
+                       (time.time(), sock, pane['pane_id']))
+    return selected[3]

@@ -62,33 +62,64 @@ def backend():
     return navigator
 
 
-def jump(db, pane, client=None, foreground=True):
+class FocusToggle:
+    """Remember one return window for consecutive presses of the same agent."""
+    def __init__(self):
+        self.navigator = None
+        self.identity = None
+        self.origin = None
+        self.at_target = False
+
+    def press(self, db, pane, client=None):
+        if self.navigator is None:
+            self.navigator = backend()
+        navigator = self.navigator
+        if not all(callable(getattr(navigator, method, None))
+                   for method in ('current_window', 'restore_window')):
+            raise RuntimeError('Navigator does not support --toggle-focus; '
+                               'it needs current_window() and restore_window(window)')
+        identity = pane.get('identity') or (pane['socket'], pane['pane_id'], pane['pane_pid'])
+        if identity == self.identity and self.at_target:
+            navigator.restore_window(self.origin)
+            self.at_target = False
+            return 'returned to previous window'
+        try:
+            origin = self.origin if identity == self.identity else navigator.current_window()
+            if origin is None:
+                raise RuntimeError('Cannot determine the previous window for --toggle-focus')
+        except (RuntimeError, OSError) as error:
+            # Missing desktop permissions must not disable ordinary selection.
+            # Retry capture on the next press so granting access takes effect.
+            print('maixy: window toggle unavailable: ' + str(error) +
+                  '; selecting agent without toggle', file=sys.stderr, flush=True)
+            jump(db, pane, client, navigator=navigator)
+            self.identity, self.origin, self.at_target = None, None, False
+            return 'selected ' + pane['pane_title']
+        jump(db, pane, client, navigator=navigator)
+        # Commit toggle state only after successful navigation. Returning never
+        # acknowledges a completion that occurred while viewing the agent.
+        self.identity, self.origin, self.at_target = identity, origin, True
+        return 'selected ' + pane['pane_title']
+
+
+def jump(db, pane, client=None, foreground=True, navigator=None):
     if pane.get('kind', 'tmux') == 'tmux':
-        # tmux selects stable IDs and records acknowledgment after success.
-        tmux.jump(db, pane, client, foreground=False)
+        # Acknowledge only after both pane selection and host focus succeed.
+        tty = tmux.jump(db, pane, client, foreground=False, acknowledge=False)
         if foreground:
-            fmt = tmux.SEP.join(['#{client_name}', '#{client_activity}', '#{client_tty}'])
-            clients = [line.split(tmux.SEP) for line in tmux.tmux(pane['socket'], 'list-clients', '-F', fmt).stdout.splitlines()]
-            clients = [c for c in clients if len(c) == 3 and (not client or client in (c[0], c[2]))]
-            selected = max(clients, key=lambda c: int(c[1] or 0), default=None)
-            if selected:
-                from .processes import inventory
-                from .hosts import identify
-                records = inventory()
-                matches = [r for r in records.values() if r['tty'] == selected[2]]
-                host = identify(matches[0]['pid'], records) if matches else dict(host='Terminal', host_chain=[])
-                target = dict(pane, pane_tty=selected[2], **host)
-                try:
-                    backend().focus(target)
-                except (RuntimeError, OSError) as error:
-                    print('maixy: selected tmux pane; host focus failed: ' + str(error), file=sys.stderr)
-        return
-    if 'editor_bridge' in pane:
+            from .processes import inventory
+            from .hosts import identify
+            records = inventory()
+            matches = [r for r in records.values() if r['tty'] == tty]
+            host = identify(matches[0]['pid'], records) if matches else dict(host='Terminal', host_chain=[])
+            target = dict(pane, pane_tty=tty, **host)
+            (navigator or backend()).focus(target)
+    elif 'editor_bridge' in pane:
         editor.select(pane)
         if foreground:
-            backend().focus(pane)
+            (navigator or backend()).focus(pane)
     else:
-        backend().focus(pane, foreground)
+        (navigator or backend()).focus(pane, foreground)
     # Failed external navigation must leave the finished key green.
     with db:
         db.execute('UPDATE events SET acknowledged=? WHERE socket=? AND pane=?',

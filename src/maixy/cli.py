@@ -30,9 +30,14 @@ def main():
     ap.add_argument('--session', help='only include this tmux session')
     ap.add_argument('--client', help='tmux client tty to switch (default: most recently active)')
     ap.add_argument('--no-focus', action='store_true', help='select tmux panes without bringing their host application forward')
+    ap.add_argument('--toggle-focus', action='store_true', help='repeated dashboard key presses toggle between the agent and previous window')
     ap.add_argument('--interval', type=float, default=1, help='agent discovery interval in seconds')
     ap.add_argument('--navigator', help='auto, macos, x11, sway, hyprland, custom, headless, plugin name, or module:factory (default: MAIXY_NAVIGATOR or auto)')
     args = ap.parse_args()
+    if args.toggle_focus and args.no_focus:
+        ap.error('--toggle-focus cannot be combined with --no-focus')
+    if args.toggle_focus and args.command not in ('run', 'install-autostart'):
+        ap.error('--toggle-focus applies to the dashboard or install-autostart')
     configure(args.navigator)
     if args.command == 'reload':
         request_reload()

@@ -10,7 +10,7 @@ from .state import connect, assign_slots, pane_status
 from .status import StatusTracker, scan_status
 from .tmux import socket_path
 from .discovery import discover
-from .navigation import jump
+from .navigation import jump, FocusToggle
 from .runtime import dependencies
 from .reload import acquire_lock, consume_request, restart
 
@@ -18,6 +18,7 @@ DISPLAY_REFRESH_INTERVAL = 15.0
 
 
 def dashboard(args):
+    toggle = FocusToggle() if getattr(args, 'toggle_focus', False) else None
     dependencies()
     sock = socket_path(args.socket)
     lock = acquire_lock()
@@ -42,6 +43,8 @@ def dashboard(args):
     page, last_scan, last_status_scan, last_refresh, last_error = 0, float('-inf'), float('-inf'), float('-inf'), ''
     last_tick, last_wall = time.monotonic(), time.time()
     print('maixy: watching local agents and ' + sock + '; Ctrl-C to stop', flush=True)
+    if toggle:
+        print('maixy: window toggle enabled', flush=True)
     try:
         while not stopped:
             if reloading or consume_request():
@@ -85,8 +88,12 @@ def dashboard(args):
                         for key in sorted(keys - held):
                             if key in visible:
                                 try:
-                                    jump(db, visible[key], args.client, not args.no_focus)
-                                    print('maixy: selected ' + visible[key]['pane_title'], flush=True)
+                                    if toggle:
+                                        message = toggle.press(db, visible[key], args.client)
+                                    else:
+                                        jump(db, visible[key], args.client, not args.no_focus)
+                                        message = 'selected ' + visible[key]['pane_title']
+                                    print('maixy: ' + message, flush=True)
                                 except Exception as e:
                                     print('maixy: ' + str(e), file=sys.stderr, flush=True)
                         held = keys

@@ -80,8 +80,8 @@ maixy install-autostart
 This installs and starts a user LaunchAgent at
 `~/Library/LaunchAgents/local.maixy.dashboard.plist`. It uses the current Python
 environment and state directory, captures the selected tmux socket and any
-supplied `--session`, `--client`, `--interval`, `--no-focus`, and `--navigator`
-options, and preserves supported Maixy configuration variables. Shell-specific
+supplied `--session`, `--client`, `--interval`, `--no-focus`, `--toggle-focus`, and
+`--navigator` options, and preserves supported Maixy configuration variables. Shell-specific
 variables and editor credentials are not copied into the service. Re-run the
 command to change its startup options; a managed instance stops before its
 replacement starts. An existing manual instance must be stopped first.
@@ -128,6 +128,7 @@ maixy --session work           # restrict discovery to this tmux session
 maixy --socket /path/to/tmux.sock
 maixy --client /dev/ttys000
 maixy --no-focus               # select tmux panes without raising their host
+maixy --toggle-focus           # repeated agent key presses return to the previous window
 maixy --interval 2
 maixy --navigator sway         # explicit desktop backend
 ```
@@ -189,6 +190,44 @@ maixy doctor                          # reports the chosen backend
 ```
 
 Available built-ins are `macos`, `x11`, `sway`, `hyprland`, `custom`, and `headless`. Missing desktop tools produce an error when navigation is requested; discovery and status tracking continue. For SSH/headless sessions, `--no-focus` still selects the exact tmux pane in an attached client. Standalone terminal windows require a graphical or custom navigator.
+
+### Returning to the previous window
+
+Start the dashboard with `maixy --toggle-focus` to alternate between an agent's
+window and the window that was active before selecting it. The first press selects
+the agent; the second returns to the original window; the third selects the agent
+again. Pressing a different agent key remembers a new return window. Return presses
+do not acknowledge new completions; selecting the agent again does.
+
+The option is off by default and supports the built-in macOS, X11, Sway, and
+Hyprland navigators, including tmux hosts and editor bridge windows. On macOS,
+capturing and restoring the exact window requires Accessibility permission for
+Maixy's Python process. X11 also needs `xprop` (`x11-utils` on Debian/Ubuntu).
+If the active window cannot be captured (for example, while Accessibility access
+is missing), keys still select agents normally and the log explains why toggling
+is unavailable. Maixy retries capture on the next press after access is granted.
+The return window is remembered only for the running dashboard and resets on
+reload or restart. It restores window focus; it does not restore a previously
+selected terminal tab, tmux pane, or editor terminal within the same window.
+Closed or inaccessible return windows report an error rather than selecting a
+replacement. This option cannot be combined with `--no-focus` and does not apply
+to one-shot `maixy jump` commands.
+
+To enable it for automatic startup on macOS:
+
+```sh
+maixy install-autostart --toggle-focus
+```
+
+`maixy reload` keeps the dashboard's existing startup options; it does not enable
+`--toggle-focus` in an instance started without it. For a managed dashboard, use
+the installation command above to enable the option and restart the service.
+
+Python navigator plugins can opt in by implementing `current_window()`, which
+returns an opaque reference to the active window, and `restore_window(window)`,
+which restores that exact existing window or raises `RuntimeError`. Plugins that
+only implement `focus`, the custom command navigator, and headless navigation
+report that toggling is unsupported.
 
 ### VS Code terminal bridge
 

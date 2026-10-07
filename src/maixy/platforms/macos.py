@@ -2,6 +2,15 @@ from ..tmux import run
 
 
 class Navigator:
+    def current_window(self):
+        from .macos_windows import Accessibility
+        if not hasattr(self, '_windows'):
+            self._windows = Accessibility()
+        return self._windows.current_window()
+
+    def restore_window(self, window):
+        self._windows.restore_window(window)
+
     def focus(self, pane, foreground=True):
         host = pane.get('host', 'Terminal')
         if host in ('Terminal', 'iTerm') and pane.get('pane_tty'):

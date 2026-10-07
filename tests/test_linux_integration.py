@@ -136,19 +136,30 @@ time.sleep(30)
                     time.sleep(.05)
                 self.assertIsNotNone(target, 'Agent terminal window was not created: '
                                      + str([(t.pid, t.poll()) for t in terminals]) + '; windows=' + str(windows))
-                X11Navigator().focus(dict(host_chain=[terminals[0].pid], window_title='Maixy target'))
-                deadline = time.monotonic() + 3
-                active = 0
-                while time.monotonic() < deadline:
-                    result = tmux.run(['xprop', '-root', '_NET_ACTIVE_WINDOW']).stdout
-                    try:
-                        active = int(result.split()[-1], 16)
-                    except ValueError:
-                        pass
-                    if active == int(target, 16):
-                        break
-                    time.sleep(.05)
-                self.assertEqual(active, int(target, 16))
+                def wait_for_focus(window_id):
+                    deadline = time.monotonic() + 3
+                    active = 0
+                    while time.monotonic() < deadline:
+                        result = tmux.run(['xprop', '-root', '_NET_ACTIVE_WINDOW']).stdout
+                        try:
+                            active = int(result.split()[-1], 16)
+                        except ValueError:
+                            pass
+                        if active == int(window_id, 16):
+                            break
+                        time.sleep(.05)
+                    self.assertEqual(active, int(window_id, 16))
+
+                navigator = X11Navigator()
+                other = next(w[0] for w in windows if len(w) == 5 and w[2] == str(terminals[1].pid))
+                navigator.focus(dict(host_chain=[terminals[1].pid], window_title='Other terminal'))
+                wait_for_focus(other)
+                origin = navigator.current_window()
+                self.assertEqual(int(origin[0], 16), int(other, 16))
+                navigator.focus(dict(host_chain=[terminals[0].pid], window_title='Maixy target'))
+                wait_for_focus(target)
+                navigator.restore_window(origin)
+                wait_for_focus(other)
         finally:
             os.close(read_fd)
             if write_fd is not None:

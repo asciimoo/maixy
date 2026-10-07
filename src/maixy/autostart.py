@@ -35,6 +35,8 @@ def specification(args):
             command.extend(['--' + option, value])
     if args.no_focus:
         command.append('--no-focus')
+    if getattr(args, 'toggle_focus', False):
+        command.append('--toggle-focus')
     environment = {'MAIXY_HOME': str(root),
                    'PATH': os.environ.get('PATH', '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin')}
     # Preserve only supported configuration, never the calling agent's whole
