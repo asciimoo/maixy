@@ -4,6 +4,10 @@ A physical dashboard for **local coding agents**, using the nine LCD keys on a L
 
 Each key shows the agent's pane or terminal title, host/window name, and status. Active background subagents appear as a count in the parent's header (`+3` means three active children), rather than separate keys. Press a key to select the agent and acknowledge its completion.
 
+![Demonstration of Maixy on an MX Keypad: Codex and Claude show WORKING, NEEDS INPUT, FINISHED, READY, and UNKNOWN; one key is empty.](docs/images/maixy-keypad-demo.png)
+
+*Demonstration mockup with fictional Codex and Claude sessions, not a photograph of a running device. Colors and layout are illustrative. UNKNOWN indicates that a live agent's status cannot be determined.*
+
 | Background | Label | Meaning |
 | --- | --- | --- |
 | Light blue | `WORKING` | A prompt is in progress. |
