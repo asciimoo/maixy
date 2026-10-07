@@ -51,6 +51,15 @@ class Agent:
         """Return child lifecycle logs belonging to this live parent session."""
         return []
 
+    def background_tracker(self):
+        """Optional per-log tracker with observe(obj, stamp), active, and updated.
+
+        active maps task IDs to start timestamps; updated is the most recent
+        observed task completion. Logs are replayed on initialization/reload.
+        Track lifecycle metadata only, never commands or conversation content.
+        """
+        return None
+
     def display_status(self, text, title=''):
         lines = [line.strip() for line in text.splitlines()[-18:]]
         for status in ('working', 'waiting', 'interrupted', 'idle'):

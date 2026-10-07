@@ -11,6 +11,22 @@ from maixy.agents.claude import Claude
 
 
 class HookTests(unittest.TestCase):
+    def test_claude_stop_with_background_work_stays_working(self):
+        adapter = Claude()
+        for task_type in ('shell', 'subagent', 'workflow'):
+            with self.subTest(task_type=task_type):
+                self.assertEqual(adapter.hook_status('Stop', {'background_tasks': [
+                    {'id': 'job', 'type': task_type, 'status': 'running'},
+                ]}), 'working')
+        self.assertEqual(adapter.hook_status('Stop', {'background_tasks': []}), 'done')
+        self.assertEqual(adapter.hook_status('Stop', {}), 'done')
+        self.assertEqual(adapter.hook_status('Stop', {'background_tasks': [
+            {'id': 'job', 'type': 'shell', 'status': 'completed'},
+        ]}), 'done')
+        self.assertIsNone(adapter.hook_status('Stop', {'agent_id': 'child', 'background_tasks': [
+            {'id': 'job', 'type': 'shell', 'status': 'running'},
+        ]}))
+
     def test_claude_question_hooks_wait_and_resume(self):
         adapter = Claude()
         self.assertEqual(adapter.hook_status('PreToolUse', {'tool_name': 'AskUserQuestion'}), 'waiting')

@@ -13,6 +13,99 @@ def metadata(pid):
         return {}
 
 
+TASK_ENDED = frozenset(('completed', 'failed', 'stopped', 'killed'))
+
+
+def task_notifications(obj):
+    """Extract Claude's task lifecycle envelope, not mentions in ordinary prose."""
+    if obj.get('type') == 'system' and obj.get('subtype') == 'task_notification':
+        return [(obj.get('task_id'), obj.get('status'))]
+    kind = obj.get('type')
+    if kind == 'user':
+        content = obj.get('message', {}).get('content', '')
+    elif kind == 'queue-operation' and obj.get('operation') == 'enqueue':
+        # Background completions can enter the input queue while Claude is
+        # busy. They are lifecycle notifications before delivery to a turn.
+        content = obj.get('content', '')
+    elif kind == 'attachment':
+        attachment = obj.get('attachment', {})
+        if not isinstance(attachment, dict) or attachment.get('type') != 'queued_command' or \
+                attachment.get('humanTurn') is True:
+            return []
+        origin = attachment.get('origin', {})
+        task_origin = isinstance(origin, dict) and origin.get('kind') == 'task-notification'
+        if not task_origin and attachment.get('commandMode') != 'task-notification':
+            return []
+        content = attachment.get('prompt', '')
+    else:
+        return []
+    texts = [content] if isinstance(content, str) else []
+    if isinstance(content, list):
+        texts = [part.get('text', '') for part in content
+                 if isinstance(part, dict) and part.get('type') == 'text']
+    events = []
+    for text in texts:
+        if not isinstance(text, str):
+            continue
+        envelope = re.match(r'\s*<task-notification>(.*?)</task-notification>', text, re.S)
+        if envelope:
+            task = re.search(r'<task-id>([\w-]+)</task-id>', envelope[1])
+            status = re.search(r'<status>([\w-]+)</status>', envelope[1])
+            if task and status:
+                events.append((task[1], status[1]))
+    return events
+
+
+class BackgroundTasks:
+    """Shell jobs may outlive both the parent's reply and a subagent's handback."""
+
+    def __init__(self):
+        self.active = {}
+        self.updated = 0
+        self.stops = {}
+
+    def finish(self, task, stamp):
+        if isinstance(task, str) and task in self.active:
+            del self.active[task]
+            self.updated = max(self.updated, stamp)
+
+    def observe(self, obj, stamp):
+        for task, status in task_notifications(obj):
+            if status in TASK_ENDED:
+                self.finish(task, stamp)
+        content = obj.get('message', {}).get('content', [])
+        if not isinstance(content, list):
+            return
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            tool_id = part.get('id')
+            inputs = part.get('input', {})
+            if obj.get('type') == 'assistant' and part.get('type') == 'tool_use' and \
+                    part.get('name') == 'TaskStop' and isinstance(tool_id, str) and isinstance(inputs, dict):
+                task = inputs.get('task_id')
+                if isinstance(task, str):
+                    self.stops[tool_id] = task
+            if obj.get('type') != 'user' or part.get('type') != 'tool_result':
+                continue
+            tool_id = part.get('tool_use_id')
+            stopped = self.stops.pop(tool_id, None) if isinstance(tool_id, str) else None
+            if part.get('is_error'):
+                continue
+            if stopped:
+                self.finish(stopped, stamp)
+            result = obj.get('toolUseResult')
+            if not isinstance(result, dict):
+                continue
+            task = result.get('backgroundTaskId')
+            if isinstance(task, str) and task:
+                self.active[task] = stamp
+            # TaskOutput can observe completion before its notification arrives.
+            task = result.get('task')
+            if isinstance(task, dict) and task.get('status') in TASK_ENDED:
+                self.finish(task.get('task_id'), stamp)
+
+
 class Claude(Agent):
     hook_events = Agent.hook_events + ('Notification',)
     hook_notification_matcher = 'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input'
@@ -47,6 +140,9 @@ class Claude(Agent):
     def subagent_paths(self, pane, path):
         return list((path.parent / path.stem / 'subagents').glob('agent-*.jsonl'))
 
+    def background_tracker(self):
+        return BackgroundTasks()
+
     def display_status(self, text, title=''):
         lines = [line.strip() for line in text.splitlines()[-18:]]
         footer = '\n'.join(lines)
@@ -72,6 +168,10 @@ class Claude(Agent):
         return None
 
     def event_status(self, obj):
+        # Task notifications are lifecycle metadata, not new user prompts.
+        # Their completion updates the per-log task tracker separately.
+        if task_notifications(obj):
+            return None
         kind, message = obj.get('type'), obj.get('message', {})
         content = message.get('content', '')
         if kind == 'assistant' and isinstance(content, list) and any(
@@ -119,6 +219,10 @@ class Claude(Agent):
 
     def hook_status(self, event, payload):
         status = super().hook_status(event, payload)
+        if status == 'done' and event == 'Stop' and any(
+                isinstance(task, dict) and task.get('status') not in TASK_ENDED
+                for task in payload.get('background_tasks', []) or []):
+            return 'working'
         if status == 'working' and event == 'PreToolUse' and payload.get('tool_name') == 'AskUserQuestion':
             return 'waiting'
         return status

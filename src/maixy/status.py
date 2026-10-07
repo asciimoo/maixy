@@ -61,12 +61,15 @@ class SessionTail:
     def __init__(self, path, agent):
         self.path, self.agent = Path(path), agent
         self.offset, self.remainder, self.last, self.initialized = 0, b'', None, False
+        self.background = registry().get(agent).background_tracker()
 
     @staticmethod
-    def signal(line, agent):
+    def signal(line, agent, background=None):
         try:
             obj = json.loads(line)
             status, stamp = event_status(agent, obj), event_time(obj)
+            if background is not None and stamp is not None:
+                background.observe(obj, stamp)
             return (status, stamp) if status and stamp else None
         except (ValueError, TypeError, AttributeError):
             return None
@@ -94,6 +97,7 @@ class SessionTail:
         initial = not self.initialized or size < self.offset
         if initial:
             self.offset, self.remainder, self.last = max(0, size - 1024 * 1024), b'', None
+            self.background = registry().get(self.agent).background_tracker()
         if size == self.offset and not initial:
             return None, False
         with self.path.open('rb') as stream:
@@ -106,14 +110,34 @@ class SessionTail:
         self.remainder = lines.pop()
         latest = self.last
         for line in lines:
-            event = self.signal(line, self.agent)
+            event = self.signal(line, self.agent, self.background if not initial else None)
             if event:
                 latest = event
         if initial and latest is None:
             latest = self.baseline(self.offset - len(self.remainder))
+        if initial and self.background is not None:
+            # Starts can precede the recent reply by megabytes. Reconstruct the
+            # registry once, streaming complete records without retaining text.
+            end = self.offset - len(self.remainder)
+            with self.path.open('rb') as stream:
+                for line in stream:
+                    if stream.tell() > end:
+                        break
+                    self.signal(line, self.agent, self.background)
         changed = latest != self.last
         self.last, self.initialized = latest, True
         return (latest if changed or initial else None), initial
+
+    def current(self):
+        if self.last is None or self.background is None:
+            return self.last
+        status, stamp = self.last
+        if status not in ('working', 'waiting'):
+            if self.background.active:
+                return 'working', max(self.background.active.values())
+            if status == 'done':
+                stamp = max(stamp, self.background.updated)
+        return status, stamp
 
 
 class StatusTracker:
@@ -169,12 +193,15 @@ class StatusTracker:
             except (OSError, ValueError, TypeError):
                 unresolved = True
             unresolved = unresolved or child.last is None
-        activity = [child.last for child in children.values() if child.last and child.last[0] in ('working', 'waiting')]
+        child_signals = [child.current() for child in children.values()]
+        activity = [signal for signal in child_signals if signal and signal[0] in ('working', 'waiting')]
+        if tail.background is not None:
+            activity.extend(('working', stamp) for stamp in tail.background.active.values())
         pane['background_count'] = len(activity)
         self.active_children.pop(identity, None)
         if activity:
             self.active_children[identity] = len(activity)
-        status, stamp = tail.last
+        status, stamp = tail.current()
         if status not in ('working', 'waiting'):
             if activity:
                 status = 'working' if any(s == 'working' for s, _ in activity) else 'waiting'
@@ -182,7 +209,7 @@ class StatusTracker:
             elif unresolved:
                 status = 'unknown'
             elif status == 'done':
-                stamp = max([stamp] + [child.last[1] for child in children.values() if child.last])
+                stamp = max([stamp] + [signal[1] for signal in child_signals if signal])
                 previous = self.signals.get(identity)
                 if previous and previous[0] in ('working', 'waiting') and stamp < previous[1]:
                     # A closed/removed child has no final log event. Completion
@@ -194,7 +221,13 @@ class StatusTracker:
         signal = status, stamp
         changed = signal != self.signals.get(identity)
         self.signals[identity] = signal
-        if event or changed:
+        # A tmux Stop hook can write directly to events between polls, even
+        # when no native records changed. Restore active/unresolved work.
+        current = db.execute('SELECT * FROM events WHERE socket=? AND pane=?',
+                             (pane['socket'], pane['pane_id'])).fetchone() if activity or unresolved else None
+        premature_completion = current and current['owner'] == pane['pane_pid'] and \
+            current['agent'] == pane['agent'] and current['status'] in ('done', 'idle')
+        if event or changed or premature_completion:
             if initial:
                 # Rebuild observations without inventing a live completion
                 # from a working baseline left by the previous dashboard.

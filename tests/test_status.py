@@ -161,6 +161,261 @@ class SessionTests(unittest.TestCase):
         with path.open('a') as stream:
             stream.write(json.dumps(obj) + '\n')
 
+    def start_shell(self, task, seconds):
+        self.append_claude('user', seconds, message={'content': [
+            {'type': 'tool_result', 'tool_use_id': 'tool-' + task},
+        ]}, toolUseResult={'backgroundTaskId': task})
+
+    def finish_shell(self, task, seconds, status='completed', **fields):
+        self.append_claude('user', seconds, message={'content':
+            '<task-notification><task-id>{}</task-id><tool-use-id>tool-{}</tool-use-id>'
+            '<status>{}</status></task-notification>'.format(task, task, status)}, **fields)
+
+    def test_claude_background_shells_outlast_reply_and_stop_hook(self):
+        self.pane.update(agent='claude', kind='process', session_path=str(self.path), pane_title='Test')
+        self.start_shell('review', 1)
+        self.start_shell('tests', 2)
+        self.append_claude('assistant', 3, message={'stop_reason': 'end_turn'})
+        stamp = event_time({'timestamp': '2026-10-04T12:00:04Z'})
+        self.db.execute('INSERT INTO session_events VALUES(?,?,?,?)', ('claude', 'parent', 'done', stamp))
+        self.db.commit()
+        with patch.object(registry().get('claude'), 'session_id', return_value='parent'), \
+             patch('maixy.status.host_screen', return_value='❯'):
+            tracker = StatusTracker()
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+            self.assertEqual(self.pane['background_count'], 2)
+            # Hooks from an older install write directly to tmux events too.
+            self.db.execute("UPDATE events SET status='done', updated=?", (stamp,))
+            self.db.commit()
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+            self.finish_shell('review', 5)
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+            self.assertEqual(self.pane['background_count'], 1)
+            tracker = StatusTracker()
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+            self.finish_shell('tests', 6, status='failed', isMeta=True)
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'done')
+            self.assertEqual(self.pane['background_count'], 0)
+            self.db.execute('UPDATE events SET acknowledged=updated')
+            self.db.commit()
+            scan_status(self.db, [self.pane], StatusTracker())
+            self.assertEqual(state.pane_status(self.db, self.pane), 'idle')
+
+    def test_claude_child_shell_outlasts_child_handback(self):
+        self.pane.update(agent='claude', kind='process', session_path=str(self.path), pane_title='Test')
+        child_dir = self.path.parent / self.path.stem / 'subagents'
+        child_dir.mkdir(parents=True)
+        child = child_dir / 'agent-review.jsonl'
+        parent = self.path
+        self.path = child
+        self.start_shell('review', 1)
+        self.append_claude('user', 2, toolEndsTurn=True,
+                           message={'content': [{'type': 'tool_result'}]})
+        self.path = parent
+        self.append_claude('assistant', 3, message={'stop_reason': 'end_turn'})
+        tracker = StatusTracker()
+        with patch('maixy.status.host_screen', return_value=None):
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+            self.assertEqual(self.pane['background_count'], 1)
+            self.path = child
+            self.finish_shell('review', 4)
+            self.path = parent
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'done')
+
+    def test_claude_shell_baseline_replays_tasks_before_recent_reply(self):
+        self.pane.update(agent='claude', kind='process', session_path=str(self.path), pane_title='Test')
+        self.start_shell('review', 1)
+        with self.path.open('a') as stream:
+            stream.write(json.dumps({'type': 'progress', 'data': {'output': 'x' * (2 * 1024 * 1024)}}) + '\n')
+        self.append_claude('assistant', 2, message={'stop_reason': 'end_turn'})
+        tracker = StatusTracker()
+        with patch('maixy.status.host_screen', return_value=None):
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+            self.finish_shell('review', 3)
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'done')
+            # A new dashboard discovering only completed history stays ready.
+            self.db.execute('DELETE FROM events')
+            self.db.execute('DELETE FROM observations')
+            self.db.commit()
+            scan_status(self.db, [self.pane], StatusTracker())
+            self.assertEqual(state.pane_status(self.db, self.pane), 'idle')
+            # Truncating/replacing a log must discard the old task registry.
+            self.start_shell('old', 4)
+            scan_status(self.db, [self.pane], tracker)
+            self.path.write_text('')
+            self.append_claude('assistant', 5, message={'stop_reason': 'end_turn'})
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(self.pane['background_count'], 0)
+
+    def test_claude_shell_completion_does_not_finish_parent_continuation(self):
+        self.pane.update(agent='claude', kind='process', session_path=str(self.path), pane_title='Test')
+        self.start_shell('review', 1)
+        self.append_claude('assistant', 2, message={'stop_reason': 'end_turn'})
+        tracker = StatusTracker()
+        with patch('maixy.status.host_screen', return_value=None):
+            scan_status(self.db, [self.pane], tracker)
+            self.append_claude('assistant', 3, message={'stop_reason': 'tool_use'})
+            self.finish_shell('review', 4)
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+            self.assertEqual(self.pane['background_count'], 0)
+            self.append_claude('assistant', 5, message={'content': [
+                {'type': 'tool_use', 'name': 'AskUserQuestion'},
+            ]})
+            self.start_shell('tests', 6)
+            self.append_claude('assistant', 7, message={'content': [
+                {'type': 'tool_use', 'name': 'AskUserQuestion'},
+            ]})
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'waiting')
+            self.finish_shell('tests', 8)
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'waiting')
+
+    def test_claude_task_output_and_stop_confirm_shell_completion(self):
+        self.pane.update(agent='claude', kind='process', session_path=str(self.path), pane_title='Test')
+        for ended in ('completed', 'failed', 'stopped', 'killed'):
+            with self.subTest(status=ended), patch('maixy.status.host_screen', return_value=None):
+                self.path.write_text('')
+                self.db.execute('DELETE FROM events')
+                self.db.commit()
+                self.start_shell('review', 1)
+                self.append_claude('assistant', 2, message={'stop_reason': 'end_turn'})
+                tracker = StatusTracker()
+                scan_status(self.db, [self.pane], tracker)
+                for seconds, task_status, expected in ((3, 'running', 'working'), (5, ended, 'done')):
+                    self.append_claude('user', seconds, message={'content': [
+                        {'type': 'tool_result', 'tool_use_id': 'output'},
+                    ]}, toolUseResult={'retrieval_status': 'success', 'task': {
+                        'task_id': 'review', 'task_type': 'local_bash', 'status': task_status,
+                    }})
+                    self.append_claude('assistant', seconds + 1, message={'stop_reason': 'end_turn'})
+                    scan_status(self.db, [self.pane], tracker)
+                    self.assertEqual(state.pane_status(self.db, self.pane), expected)
+                self.start_shell('next', 7)
+                for seconds, error, expected in ((8, True, 1), (10, False, 0)):
+                    self.append_claude('assistant', seconds, message={'content': [
+                        {'type': 'tool_use', 'name': 'TaskStop', 'id': 'stop', 'input': {'task_id': 'next'}},
+                    ]})
+                    self.append_claude('user', seconds + 1, message={'content': [
+                        {'type': 'tool_result', 'tool_use_id': 'stop', 'is_error': error},
+                    ]}, toolUseResult={'task_id': 'next', 'task_type': 'local_bash'})
+                    scan_status(self.db, [self.pane], tracker)
+                    self.assertEqual(self.pane['background_count'], expected)
+                    self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+
+    def test_claude_shell_metadata_requires_valid_lifecycle_records(self):
+        self.pane.update(agent='claude', kind='process', session_path=str(self.path), pane_title='Test')
+        self.append_claude('user', 1, message={'content': [
+            {'type': 'tool_result', 'is_error': True},
+        ]}, toolUseResult={'backgroundTaskId': 'failed-launch'})
+        self.append_claude('user', 2, message={'content': 'Describe backgroundTaskId'},
+                           toolUseResult={'backgroundTaskId': 'not-a-tool-result'})
+        self.start_shell('review', 3)
+        self.append_claude('assistant', 4, message={'stop_reason': 'end_turn'})
+        tracker = StatusTracker()
+        with patch('maixy.status.host_screen', return_value=None):
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(self.pane['background_count'], 1)
+            self.finish_shell('unrelated', 5)
+            self.finish_shell('review', 6, status='running')
+            self.append_claude('user', 7, message={'content':
+                'Example: <task-notification><task-id>review</task-id>'
+                '<status>completed</status></task-notification>'})
+            self.append_claude('assistant', 8, message={'stop_reason': 'end_turn'})
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+            self.assertEqual(self.pane['background_count'], 1)
+            record = json.dumps({'type': 'system', 'subtype': 'task_notification',
+                'task_id': 'review', 'status': 'completed', 'timestamp': '2026-10-04T12:00:09Z'})
+            with self.path.open('a') as stream:
+                stream.write(record[:20])
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+            with self.path.open('a') as stream:
+                stream.write(record[20:] + '\n')
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'done')
+            self.assertEqual(self.pane['background_count'], 0)
+
+    def test_claude_queued_task_notifications_clear_finished_shells(self):
+        self.pane.update(agent='claude', kind='process', session_path=str(self.path), pane_title='Test')
+        for ended in ('completed', 'failed', 'stopped', 'killed'):
+            notification = '<task-notification><task-id>review</task-id><status>{}</status></task-notification>'.format(ended)
+            for kind, fields in (
+                ('queue-operation', {'operation': 'enqueue', 'content': notification}),
+                ('attachment', {'attachment': {'type': 'queued_command', 'prompt': notification,
+                    'commandMode': 'task-notification', 'origin': {'kind': 'task-notification', 'producer': 'session-task'}}}),
+                ('attachment', {'attachment': {'type': 'queued_command', 'prompt': notification,
+                    'commandMode': 'task-notification'}}),
+            ):
+                with self.subTest(status=ended, kind=kind, fields=fields), \
+                     patch('maixy.status.host_screen', return_value=None):
+                    self.path.write_text('')
+                    self.db.execute('DELETE FROM events')
+                    self.db.commit()
+                    self.start_shell('review', 1)
+                    self.append_claude('assistant', 2, message={'stop_reason': 'end_turn'})
+                    tracker = StatusTracker()
+                    scan_status(self.db, [self.pane], tracker)
+                    self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+                    self.append_claude(kind, 3, **fields)
+                    scan_status(self.db, [self.pane], tracker)
+                    self.assertEqual(state.pane_status(self.db, self.pane), 'done')
+                    self.assertEqual(self.pane['background_count'], 0)
+                    # Recover the finish even if a dashboard missed the queued
+                    # completion, as happened to the live eng-1214 session.
+                    self.db.execute("UPDATE events SET status='working', updated=?",
+                                    (event_time({'timestamp': '2026-10-04T12:00:01Z'}),))
+                    self.db.commit()
+                    scan_status(self.db, [self.pane], StatusTracker())
+                    self.assertEqual(state.pane_status(self.db, self.pane), 'done')
+                    self.db.execute('UPDATE events SET acknowledged=updated')
+                    self.db.commit()
+                    scan_status(self.db, [self.pane], StatusTracker())
+                    self.assertEqual(state.pane_status(self.db, self.pane), 'idle')
+
+                    # Delivery can log the same notification a second time
+                    # after the completion has already been acknowledged.
+                    self.append_claude('attachment', 4, attachment={
+                        'type': 'queued_command', 'prompt': notification,
+                        'origin': {'kind': 'task-notification', 'producer': 'session-task'},
+                    })
+                    scan_status(self.db, [self.pane], tracker)
+                    self.assertEqual(state.pane_status(self.db, self.pane), 'idle')
+
+    def test_claude_queue_removal_and_human_attachments_do_not_finish_jobs(self):
+        self.pane.update(agent='claude', kind='process', session_path=str(self.path), pane_title='Test')
+        self.start_shell('review', 1)
+        self.append_claude('assistant', 2, message={'stop_reason': 'end_turn'})
+        notification = '<task-notification><task-id>review</task-id><status>completed</status></task-notification>'
+        tracker = StatusTracker()
+        with patch('maixy.status.host_screen', return_value=None):
+            scan_status(self.db, [self.pane], tracker)
+            for kind, fields in (
+                ('queue-operation', {'operation': 'remove', 'content': notification}),
+                ('queue-operation', {'operation': 'enqueue', 'content': 'Explain ' + notification}),
+                ('attachment', {'attachment': {'type': 'queued_command', 'prompt': notification,
+                    'origin': {'kind': 'human'}, 'humanTurn': True, 'commandMode': 'prompt'}}),
+                ('attachment', {'attachment': {'type': 'queued_command', 'prompt': notification,
+                    'commandMode': 'prompt'}}),
+                ('attachment', {'attachment': {'type': 'edited_text_file', 'prompt': notification}}),
+            ):
+                with self.subTest(kind=kind, fields=fields):
+                    self.append_claude(kind, 3, **fields)
+                    scan_status(self.db, [self.pane], tracker)
+                    self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+                    self.assertEqual(self.pane['background_count'], 1)
+
     def test_parent_stays_working_until_all_children_finish(self):
         for agent in ('codex', 'claude'):
             with self.subTest(agent=agent):

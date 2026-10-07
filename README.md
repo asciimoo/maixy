@@ -2,7 +2,7 @@
 
 A physical dashboard for **local coding agents**, using the nine LCD keys on a Logitech MX Keypad. Agents can run in tmux, individual terminal windows, or editor terminals. Maixy discovers live processes rather than listing saved conversations.
 
-Each key shows the agent's pane or terminal title, host/window name, and status. Active background subagents appear as a count in the parent's header (`+3` means three active children), rather than separate keys. Press a key to select the agent and acknowledge its completion.
+Each key shows the agent's pane or terminal title, host/window name, and status. Active background work appears as a count in the parent's header (`+3` means three active subagents or Claude background shell tasks), rather than separate keys. Press a key to select the agent and acknowledge its completion.
 
 ![Demonstration of Maixy on an MX Keypad: Codex and Claude show WORKING, NEEDS INPUT, FINISHED, READY, and UNKNOWN; one key is empty.](docs/images/maixy-keypad-demo.png)
 
@@ -358,6 +358,12 @@ hook events; `hook_path()` and `hook_events` optionally enable the existing JSON
 hook installer. The installer expects Codex/Claude-style settings structure and
 preserves unrelated settings and hooks.
 
+`background_tracker()` optionally returns a new per-log tracker with
+`observe(obj, stamp)`, an `active` dictionary mapping task IDs to start timestamps,
+and an `updated` timestamp for the latest task completion. Maixy replays complete
+log records at startup/reload, then feeds only new records to the tracker. Retain
+task lifecycle metadata only; do not store commands or conversation content.
+
 Load an importable factory/class from the same configuration file:
 
 ```json
@@ -393,6 +399,7 @@ Codex and Claude adapters read local lifecycle events without requiring hooks or
 - Claude local commands such as `/model` return to `READY`; they do not count as assistant turns or produce `FINISHED`.
 - Claude's `AskUserQuestion` calls show `NEEDS INPUT` until the recorded answer returns, including hosts without readable terminal screens.
 - A parent's key stays `WORKING` after its prompt returns while linked Codex or Claude subagents are still working. Child sessions do not occupy keys. The parent finishes when its turn and all tracked children have finished; explicit input waits still show `NEEDS INPUT`.
+- Claude background shell commands, including review subprocesses launched by those commands, also keep the parent `WORKING` after its reply or a child handback. Task completion notifications (including queued notifications and their delivered attachments), completed `TaskOutput` results, and successful `TaskStop` results clear the corresponding job. Reloading reconstructs jobs from lifecycle metadata in the live session's log; an idle prompt or Stop hook cannot finish a session with tracked jobs still running. Jobs without a recorded completion remain active until Claude reports their end.
 - Claude child completion includes explicit turn-ending tool results such as `SubagentHandback`. Reloading recovers newer completions for sessions Maixy had already tracked as active.
 - Claude assistant activity and tool results return the key to `WORKING`, including automatic continuation after a background task without a new user prompt. Child completion cannot finish a parent that has resumed work.
 - Codex threads are matched by a unique thread name and working directory, or by session logs actually held open by a live Codex process. Internal subagent threads and archived/saved history are excluded.
@@ -403,7 +410,7 @@ Codex and Claude adapters read local lifecycle events without requiring hooks or
 - Hosts without a readable screen use native logs for working/completed states and Claude question dialogs. **Approval waits require optional hooks in these hosts**, because approvals are not reliably present in the session log. The editor bridge handles navigation, not status extraction.
 - When neither session data nor a supported screen is available, Maixy shows `UNKNOWN` instead of claiming the agent is ready.
 
-Green means **the agent finished its turn**, not that every requested task succeeded. An already idle agent does not become green merely because the dashboard first discovers it. Local session formats and terminal UI may change between agent releases.
+Green means **the agent finished its turn and its tracked background work**, not that every requested task succeeded. An already idle agent does not become green merely because the dashboard first discovers it. Local session formats and terminal UI may change between agent releases.
 
 ### Optional hooks
 
