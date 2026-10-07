@@ -1,0 +1,13 @@
+{
+  "name": "navigation",
+  "displayName": "Maixy Terminal Navigation",
+  "publisher": "maixy",
+  "version": "0.2.0",
+  "description": "Let the local Maixy keypad select an existing integrated terminal.",
+  "license": "MIT",
+  "engines": {"vscode": "^1.85.0"},
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "extensionKind": ["ui"],
+  "capabilities": {"untrustedWorkspaces": {"supported": true}}
+}

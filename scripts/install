@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Install this checkout in an isolated environment and add ~/bin launchers.
+set -euo pipefail
+
+project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+python_cmd="${PYTHON:-python3}"
+state_dir="$(PYTHONPATH="$project_dir/src" "$python_cmd" -c 'from maixy.config import ROOT; print(ROOT)')"
+bin_dir="${MAIXY_BIN_DIR:-$HOME/bin}"
+
+if [[ ! -x "$state_dir/venv/bin/python" ]]; then
+  "$python_cmd" -m venv "$state_dir/venv"
+fi
+"$state_dir/venv/bin/python" -m pip install -e "$project_dir"
+
+"$state_dir/venv/bin/python" - "$state_dir" "$bin_dir" <<'PY'
+from pathlib import Path
+import shlex
+import shutil
+import sys
+import time
+
+state_dir, bin_dir = map(Path, sys.argv[1:])
+bin_dir.mkdir(parents=True, exist_ok=True)
+launcher = '#!/bin/sh\nexec ' + shlex.quote(str(state_dir / 'venv/bin/maixy')) + ' "$@"\n'
+for name in ('maixy',):
+    target = bin_dir / name
+    if target.exists() and target.read_text() == launcher:
+        continue
+    if target.exists():
+        backup_dir = state_dir / 'launcher-backups'
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup = backup_dir / (name + '-' + str(time.time_ns()))
+        shutil.copy2(target, backup)
+        print('Backed up ' + str(target) + ' to ' + str(backup))
+    temporary = target.with_name(target.name + '.maixy-tmp')
+    temporary.write_text(launcher)
+    temporary.chmod(0o755)
+    temporary.replace(target)
+# Remove only the compatibility launcher created by earlier Maixy installers.
+alias = bin_dir / 'logiai'
+if alias.is_file() and alias.read_text() == launcher:
+    alias.unlink()
+print('Installed maixy in ' + str(bin_dir))
+PY
+
+printf '\nRun: %s/maixy\n' "$bin_dir"

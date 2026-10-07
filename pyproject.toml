@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maixy"
+version = "0.3.0"
+description = "A Logitech MX Keypad dashboard for local coding agents"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE", "THIRD-PARTY.txt"]
+authors = [{name = "Adam Tauber"}]
+keywords = ["tmux", "logitech", "keypad", "codex", "claude"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Utilities",
+]
+dependencies = ["hidapi==0.15.0", "Pillow==11.3.0"]
+
+[project.scripts]
+maixy = "maixy.cli:entrypoint"
+
+[tool.setuptools.packages.find]
+where = ["src"]

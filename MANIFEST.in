@@ -1,0 +1,4 @@
+include scripts/install scripts/install-vscode
+recursive-include editors *.json *.js
+recursive-include tests *.py *.js
+include tests/linux/Dockerfile

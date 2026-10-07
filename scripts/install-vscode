@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""Install the bundled local bridge into VS Code's extension directory."""
+import argparse
+from pathlib import Path
+import shutil
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--extensions-dir', type=Path, default=Path.home() / '.vscode/extensions',
+                    help='use ~/.vscode-insiders/extensions or ~/.cursor/extensions for other editors')
+args = parser.parse_args()
+project = Path(__file__).resolve().parent.parent
+target = args.extensions_dir.expanduser() / 'maixy.navigation-0.2.0'
+target.mkdir(parents=True, exist_ok=True)
+for source in (project / 'editors/vscode').iterdir():
+    if source.is_file():
+        shutil.copy2(source, target / source.name)
+shutil.copy2(project / 'LICENSE', target / 'LICENSE')
+print('Installed ' + str(target) + '; reload editor windows to activate the local terminal bridge.')
