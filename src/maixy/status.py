@@ -193,6 +193,11 @@ class StatusTracker:
             except (OSError, ValueError, TypeError):
                 unresolved = True
             unresolved = unresolved or child.last is None
+        backgrounds = [t.background for t in [tail, *children.values()] if t.background is not None]
+        for background in backgrounds:
+            reconcile = getattr(background, 'reconcile', None)
+            if reconcile is not None:
+                reconcile(backgrounds)
         child_signals = [child.current() for child in children.values()]
         activity = [signal for signal in child_signals if signal and signal[0] in ('working', 'waiting')]
         if tail.background is not None:

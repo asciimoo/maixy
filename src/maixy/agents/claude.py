@@ -22,6 +22,8 @@ def task_notifications(obj):
         return [(obj.get('task_id'), obj.get('status'))]
     kind = obj.get('type')
     if kind == 'user':
+        if obj.get('isCompactSummary') is True:
+            return []
         content = obj.get('message', {}).get('content', '')
     elif kind == 'queue-operation' and obj.get('operation') == 'enqueue':
         # Background completions can enter the input queue while Claude is
@@ -61,13 +63,27 @@ class BackgroundTasks:
 
     def __init__(self):
         self.active = {}
+        self.completed = {}
         self.updated = 0
         self.stops = {}
 
     def finish(self, task, stamp):
-        if isinstance(task, str) and task in self.active:
+        if not isinstance(task, str) or not task:
+            return
+        # Notifications may be logged in the parent while the job's start
+        # lives in a child. Retain completion metadata even without a local
+        # start so linked trackers can reconcile it after reading their logs.
+        self.completed[task] = max(self.completed.get(task, 0), stamp)
+        if task in self.active and stamp >= self.active[task]:
             del self.active[task]
             self.updated = max(self.updated, stamp)
+
+    def reconcile(self, trackers):
+        for task, started in list(self.active.items()):
+            ended = max((tracker.completed.get(task, 0) for tracker in trackers
+                         if isinstance(tracker, BackgroundTasks)), default=0)
+            if ended >= started:
+                self.finish(task, ended)
 
     def observe(self, obj, stamp):
         for task, status in task_notifications(obj):
@@ -98,7 +114,7 @@ class BackgroundTasks:
             if not isinstance(result, dict):
                 continue
             task = result.get('backgroundTaskId')
-            if isinstance(task, str) and task:
+            if isinstance(task, str) and task and stamp > self.completed.get(task, 0):
                 self.active[task] = stamp
             # TaskOutput can observe completion before its notification arrives.
             task = result.get('task')
@@ -168,6 +184,10 @@ class Claude(Agent):
         return None
 
     def event_status(self, obj):
+        # Compaction stores the previous conversation as a synthetic user
+        # message. It does not submit a prompt or resume an assistant turn.
+        if obj.get('type') == 'user' and obj.get('isCompactSummary') is True:
+            return None
         # Task notifications are lifecycle metadata, not new user prompts.
         # Their completion updates the per-log task tracker separately.
         if task_notifications(obj):

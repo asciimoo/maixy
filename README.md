@@ -90,8 +90,10 @@ The LaunchAgent follows Apple's
 [user-agent lifecycle](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html).
 It runs while you are logged in and is suspended with the computer during sleep.
 USB keepalive writes run independently of discovery, terminal inspection, and
-navigation. After a polling pause of five seconds or more, Maixy reopens the USB
-connection and redraws all nine keys, even if stale HID handles did not report an error.
+navigation. After a pause between polling iterations of five seconds or more,
+Maixy reopens the USB connection and redraws all nine keys, even if stale HID
+handles did not report an error. Time spent discovering agents, inspecting
+terminals, navigating, or setting up USB does not trigger this recovery.
 Assignments and completion acknowledgments remain in the same database.
 This recovery also applies to manually started dashboards on macOS and Linux.
 
@@ -402,6 +404,9 @@ preserves unrelated settings and hooks.
 and an `updated` timestamp for the latest task completion. Maixy replays complete
 log records at startup/reload, then feeds only new records to the tracker. Retain
 task lifecycle metadata only; do not store commands or conversation content.
+An optional `reconcile(trackers)` method receives the trackers for the same
+parent and its linked children after their logs have been read, allowing task
+starts and completions recorded in different logs to be matched.
 
 Load an importable factory/class from the same configuration file:
 
@@ -436,9 +441,10 @@ Codex and Claude adapters read local lifecycle events without requiring hooks or
 
 - Claude sessions are matched using their live process and session IDs.
 - Claude local commands such as `/model` return to `READY`; they do not count as assistant turns or produce `FINISHED`.
+- Claude context-compaction summaries preserve the previous status; they do not count as new prompts.
 - Claude's `AskUserQuestion` calls show `NEEDS INPUT` until the recorded answer returns, including hosts without readable terminal screens.
 - A parent's key stays `WORKING` after its prompt returns while linked Codex or Claude subagents are still working. Child sessions do not occupy keys. The parent finishes when its turn and all tracked children have finished; explicit input waits still show `NEEDS INPUT`.
-- Claude background shell commands, including review subprocesses launched by those commands, also keep the parent `WORKING` after its reply or a child handback. Task completion notifications (including queued notifications and their delivered attachments), completed `TaskOutput` results, and successful `TaskStop` results clear the corresponding job. Reloading reconstructs jobs from lifecycle metadata in the live session's log; an idle prompt or Stop hook cannot finish a session with tracked jobs still running. Jobs without a recorded completion remain active until Claude reports their end.
+- Claude background shell commands, including review subprocesses launched by those commands, also keep the parent `WORKING` after its reply or a child handback. Task completion notifications (including queued notifications and their delivered attachments), completed `TaskOutput` results, and successful `TaskStop` results clear the corresponding job, including when the completion is recorded in a different linked parent or child log. Reloading reconstructs jobs from lifecycle metadata in the live session's log; an idle prompt or Stop hook cannot finish a session with tracked jobs still running. Jobs without a recorded completion remain active until Claude reports their end.
 - Claude child completion includes explicit turn-ending tool results such as `SubagentHandback`. Reloading recovers newer completions for sessions Maixy had already tracked as active.
 - Claude assistant activity and tool results return the key to `WORKING`, including automatic continuation after a background task without a new user prompt. Child completion cannot finish a parent that has resumed work.
 - Codex threads are matched by a unique thread name and working directory, or by session logs actually held open by a live Codex process. Internal subagent threads and archived/saved history are excluded.

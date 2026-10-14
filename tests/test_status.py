@@ -112,6 +112,16 @@ class EventTests(unittest.TestCase):
             'type': 'user', 'message': {'content': 'Explain <command-name>/model</command-name>'},
         }), 'working')
 
+    def test_claude_compaction_summary_is_not_a_new_prompt_or_task_notification(self):
+        for content in ('Previous conversation', '<task-notification><task-id>review</task-id>'
+                        '<status>completed</status></task-notification>'):
+            obj = {'type': 'user', 'isCompactSummary': True, 'message': {'content': content}}
+            self.assertIsNone(event_status('claude', obj))
+            tasks = registry().get('claude').background_tracker()
+            tasks.active['review'] = 1
+            tasks.observe(obj, 2)
+            self.assertEqual(tasks.active, {'review': 1})
+
     def test_claude_question_tool_wait_and_answer(self):
         self.assertEqual(event_status('claude', {
             'type': 'assistant', 'message': {'stop_reason': 'tool_use', 'content': [
@@ -228,6 +238,72 @@ class SessionTests(unittest.TestCase):
             self.path = parent
             scan_status(self.db, [self.pane], tracker)
             self.assertEqual(state.pane_status(self.db, self.pane), 'done')
+
+    def test_claude_shell_completion_in_another_linked_log(self):
+        self.pane.update(agent='claude', kind='process', session_path=str(self.path), pane_title='Test')
+        parent = self.path
+        child_dir = parent.parent / parent.stem / 'subagents'
+        child_dir.mkdir(parents=True)
+        paths = {'parent': parent, 'child': child_dir / 'agent-child.jsonl',
+                 'sibling': child_dir / 'agent-sibling.jsonl'}
+        for owner, recipient in (('child', 'parent'), ('parent', 'child'), ('child', 'sibling')):
+            for ended in ('completed', 'stopped'):
+                for baseline in (False, True):
+                    with self.subTest(owner=owner, recipient=recipient, ended=ended, baseline=baseline), \
+                         patch('maixy.status.host_screen', return_value=None):
+                        for path in paths.values():
+                            path.write_text('')
+                        self.db.execute('DELETE FROM events')
+                        self.db.execute('DELETE FROM observations')
+                        self.db.commit()
+                        self.path = paths[owner]
+                        self.start_shell('review', 1)
+                        for name, path in paths.items():
+                            self.child_event(path, 'claude', 'done', 3 if name == 'parent' else 2)
+                        tracker = StatusTracker()
+                        scan_status(self.db, [self.pane], tracker)
+                        self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+                        self.assertEqual(self.pane['background_count'], 1)
+                        self.path = paths[recipient]
+                        self.append_claude('queue-operation', 4, operation='enqueue', content=
+                            '<task-notification><task-id>review</task-id><status>{}</status>'
+                            '</task-notification>'.format(ended))
+                        if baseline:
+                            tracker = StatusTracker()
+                        scan_status(self.db, [self.pane], tracker)
+                        self.assertEqual(state.pane_status(self.db, self.pane), 'done')
+                        self.assertEqual(self.pane['background_count'], 0)
+                        stamp = event_time({'timestamp': '2026-10-04T12:00:04Z'})
+                        self.assertEqual(tracker.signals[self.pane['identity']], ('done', stamp))
+                        self.db.execute('UPDATE events SET acknowledged=updated')
+                        self.db.commit()
+                        scan_status(self.db, [self.pane], StatusTracker())
+                        self.assertEqual(state.pane_status(self.db, self.pane), 'idle')
+                        # A later assistant continuation must still count as
+                        # work after the background job has been reconciled.
+                        self.path = parent
+                        self.append_claude('assistant', 5, message={'stop_reason': 'tool_use'})
+                        scan_status(self.db, [self.pane], tracker)
+                        self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+                        self.assertEqual(self.pane['background_count'], 0)
+        self.path = parent
+
+    def test_claude_background_completion_does_not_clear_a_newer_or_unrelated_job(self):
+        adapter = registry().get('claude')
+        owner, linked, unrelated = (adapter.background_tracker() for _ in range(3))
+        owner.active = {'review': 5, 'other': 1}
+        linked.finish('review', 4)
+        linked.finish('unknown', 6)
+        unrelated.finish('other', 6)
+        owner.reconcile([owner, linked])
+        self.assertEqual(owner.active, {'review': 5, 'other': 1})
+        linked.finish('review', 7)
+        owner.reconcile([owner, linked])
+        self.assertEqual(owner.active, {'other': 1})
+        self.assertEqual(owner.updated, 7)
+        linked.finish('review', 8)  # Duplicate delivery cannot restore green.
+        owner.reconcile([owner, linked])
+        self.assertEqual(owner.updated, 7)
 
     def test_claude_shell_baseline_replays_tasks_before_recent_reply(self):
         self.pane.update(agent='claude', kind='process', session_path=str(self.path), pane_title='Test')
@@ -653,6 +729,41 @@ class SessionTests(unittest.TestCase):
                     self.append_claude(kind, 1, **fields)
                     with patch('maixy.status.host_screen', return_value=None):
                         scan_status(self.db, [self.pane], StatusTracker())
+                    self.assertEqual(state.pane_status(self.db, self.pane), 'idle')
+
+    def test_claude_compaction_preserves_completed_and_active_turns(self):
+        self.pane.update(agent='claude', kind='process', session_path=str(self.path), pane_title='Test')
+        for completed in (True, False):
+            with self.subTest(completed=completed), patch('maixy.status.host_screen', return_value=None):
+                self.path.write_text('')
+                self.db.execute('DELETE FROM events')
+                self.db.execute('DELETE FROM observations')
+                self.db.commit()
+                self.append_claude('user', 1, message={'content': 'Task'})
+                tracker = StatusTracker()
+                scan_status(self.db, [self.pane], tracker)
+                if completed:
+                    self.append_claude('assistant', 2, message={'stop_reason': 'end_turn'})
+                    scan_status(self.db, [self.pane], tracker)
+                self.append_claude('system', 3, subtype='compact_boundary')
+                self.append_claude('user', 3, isCompactSummary=True,
+                                   isVisibleInTranscriptOnly=True, message={'content': 'Conversation summary'})
+                expected = 'done' if completed else 'working'
+                scan_status(self.db, [self.pane], tracker)
+                self.assertEqual(state.pane_status(self.db, self.pane), expected)
+                scan_status(self.db, [self.pane], StatusTracker())
+                self.assertEqual(state.pane_status(self.db, self.pane), expected)
+                if completed:
+                    self.db.execute('UPDATE events SET acknowledged=updated')
+                    self.db.commit()
+                    scan_status(self.db, [self.pane], StatusTracker())
+                    self.assertEqual(state.pane_status(self.db, self.pane), 'idle')
+                    # Recover an acknowledged session that the old detector
+                    # marked busy solely because its history was compacted.
+                    stamp = event_time({'timestamp': '2026-10-04T12:00:03Z'})
+                    self.db.execute("UPDATE events SET status='working', updated=?", (stamp,))
+                    self.db.commit()
+                    scan_status(self.db, [self.pane], StatusTracker())
                     self.assertEqual(state.pane_status(self.db, self.pane), 'idle')
 
     def test_incremental_log_and_partial_record(self):

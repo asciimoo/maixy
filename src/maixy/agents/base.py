@@ -56,6 +56,8 @@ class Agent:
 
         active maps task IDs to start timestamps; updated is the most recent
         observed task completion. Logs are replayed on initialization/reload.
+        Optional reconcile(trackers) receives trackers for this parent and
+        its linked children to resolve lifecycle events recorded across logs.
         Track lifecycle metadata only, never commands or conversation content.
         """
         return None

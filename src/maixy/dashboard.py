@@ -53,10 +53,11 @@ def dashboard(args):
             started = time.monotonic()
             wall = time.time()
             # Monotonic clocks differ in whether they advance during sleep.
-            # A paused polling loop can leave valid HID handles but a reset
-            # LCD; reopen and repaint even when USB reports no read error.
+            # A pause between iterations can leave valid HID handles but a
+            # reset LCD. Measure from the end of the previous iteration so
+            # slow discovery, navigation, or USB setup cannot cause a loop of
+            # unnecessary reconnects; keepalives run during that work.
             resumed = max(started - last_tick, wall - last_wall) >= 5
-            last_tick, last_wall = started, wall
             try:
                 if resumed:
                     if device:
@@ -137,7 +138,11 @@ def dashboard(args):
                     device.close()
                     device = None
                 time.sleep(1)
-            time.sleep(max(0, .05 - (time.monotonic() - started)))
+            last_tick = time.monotonic()
+            # Preserve a wall-clock gap if the machine slept during the work
+            # itself and its monotonic clock paused during that sleep.
+            last_wall = min(time.time(), wall + (last_tick - started))
+            time.sleep(max(0, .05 - (last_tick - started)))
     finally:
         if device:
             device.close()

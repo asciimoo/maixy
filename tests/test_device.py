@@ -92,6 +92,81 @@ class ProtocolTests(unittest.TestCase):
 
 
 class ReconnectTests(unittest.TestCase):
+    def test_polling_work_distinguishes_slow_operations_from_sleep(self):
+        for slow_stage in ('discovery', 'status', 'usb_setup', 'navigation', 'paint', 'sleep'):
+            with self.subTest(slow_stage=slow_stage), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                pane = dict(identity='test:%1:10', socket='test', pane_id='%1', pane_pid='10',
+                            agent='codex', pane_title='Test agent', window_name='work')
+                handlers, devices, ticks = {}, [], []
+                clocks = {'wall': 100.0, 'mono': 100.0}
+
+                def work(stage):
+                    if stage == slow_stage:
+                        clocks['wall'] += 6
+                        clocks['mono'] += 6
+                    elif slow_stage == 'sleep' and stage == 'status' and not ticks:
+                        # Sleep inside an iteration on a platform whose
+                        # monotonic clock does not advance while suspended.
+                        clocks['wall'] += 60
+
+                class FakeDevice:
+                    def __init__(self):
+                        self.painted, self.closed, self.polls = [], False, 0
+                        devices.append(self)
+                        work('usb_setup')
+
+                    def needs_redraw(self):
+                        return False
+
+                    def poll(self):
+                        self.polls += 1
+                        return [bytes([0x13, 0xff, 2, 0, 0, 1, 1, 0])] if self.polls % 2 else [
+                            bytes([0x13, 0xff, 2, 0, 0, 1, 0])]
+
+                    def paint(self, key, image):
+                        self.painted.append(key)
+                        work('paint')
+
+                    def close(self):
+                        self.closed = True
+
+                def discover(*args):
+                    work('discovery')
+                    return [dict(pane)]
+
+                def sleep(_seconds):
+                    ticks.append(True)
+                    clocks['wall'] += .1
+                    clocks['mono'] += .1
+                    if len(ticks) == 4:
+                        handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+                args = argparse.Namespace(socket='test', session=None, interval=.1, client=None, no_focus=True)
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(patch.object(state, 'ROOT', root))
+                    stack.enter_context(patch.object(reload, 'ROOT', root))
+                    stack.enter_context(patch.object(dashboard, 'dependencies'))
+                    stack.enter_context(patch.object(dashboard, 'Keypad', side_effect=FakeDevice))
+                    stack.enter_context(patch.object(dashboard, 'discover', side_effect=discover))
+                    stack.enter_context(patch.object(dashboard, 'scan_status', side_effect=lambda *args: work('status')))
+                    stack.enter_context(patch.object(dashboard, 'jump', side_effect=lambda *args: work('navigation')))
+                    stack.enter_context(patch.object(dashboard, 'render', return_value=b'image'))
+                    stack.enter_context(patch.object(dashboard.signal, 'signal', side_effect=lambda sig, fn: handlers.update({sig: fn})))
+                    stack.enter_context(patch.object(dashboard.time, 'monotonic', side_effect=lambda: clocks['mono']))
+                    stack.enter_context(patch.object(dashboard.time, 'time', side_effect=lambda: clocks['wall']))
+                    stack.enter_context(patch.object(dashboard.time, 'sleep', side_effect=sleep))
+                    output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                    dashboard.dashboard(args)
+                self.assertEqual(len(devices), 2 if slow_stage == 'sleep' else 1)
+                self.assertTrue(all(device.closed for device in devices))
+                self.assertGreaterEqual(len(devices[0].painted), 9)
+                if slow_stage == 'sleep':
+                    self.assertEqual(devices[1].painted, list(range(9)))
+                    self.assertEqual(output.getvalue().count('polling resumed'), 1)
+                else:
+                    self.assertNotIn('polling resumed', output.getvalue())
+
     def test_background_count_repaints_parent_without_extra_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
