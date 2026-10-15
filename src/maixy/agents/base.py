@@ -63,7 +63,9 @@ class Agent:
         return None
 
     def display_status(self, text, title=''):
-        lines = [line.strip() for line in text.splitlines()[-18:]]
+        # tmux pads shorter interfaces with blank terminal rows. Find the
+        # visible footer before limiting the status search to recent lines.
+        lines = [line.strip() for line in text.rstrip().splitlines()[-18:]]
         for status in ('working', 'waiting', 'interrupted', 'idle'):
             if any(pattern.search(line) for pattern in self.display.get(status, ()) for line in lines):
                 return status

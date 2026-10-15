@@ -15,6 +15,30 @@ CODEX_APPROVAL = 'Would you like to run the following command?\n› 1. Yes\n  2.
 
 
 class DisplayTests(unittest.TestCase):
+    def test_trailing_blank_terminal_rows_do_not_hide_status_chrome(self):
+        cases = (
+            ('claude', 'Which option?\n❯ 1. First\n  2. Second\n'
+             'Enter to select · ↑/↓ to navigate · Esc to cancel', 'waiting'),
+            ('claude', 'Do you want to proceed?\n❯ 1. Yes', 'waiting'),
+            ('claude', '✻ Pondering… (23s · ↓ 123 tokens)\n❯', 'working'),
+            ('claude', '❯\n⏵⏵ auto mode on', 'idle'),
+            ('codex', CODEX_APPROVAL, 'waiting'),
+            ('codex', 'Working (12s • esc to interrupt)\n› Ask Codex', 'working'),
+            ('codex', '› Ask Codex', 'idle'),
+        )
+        for agent, screen, expected in cases:
+            for padding in ('\n' * 25, '\n   \t' * 80):
+                with self.subTest(agent=agent, expected=expected, padding=len(padding)):
+                    self.assertEqual(display_status(agent, screen + padding), expected)
+
+    def test_blank_padding_does_not_expand_status_search_into_old_output(self):
+        for agent, old_dialog in (('claude', 'Do you want to proceed?\n❯ 1. Yes'),
+                                  ('codex', CODEX_APPROVAL)):
+            with self.subTest(agent=agent):
+                screen = old_dialog + '\n' + 'Ordinary output\n' * 20 + '\n' * 25
+                self.assertIsNone(display_status(agent, screen))
+                self.assertIsNone(display_status(agent, ' \t\n' * 25))
+
     def test_working_takes_precedence_over_codex_prompt(self):
         self.assertEqual(display_status('codex', 'Working (12s • esc to interrupt)\n› Ask Codex'), 'working')
 
@@ -854,6 +878,33 @@ class SessionTests(unittest.TestCase):
             with patch('maixy.status.time.monotonic', return_value=2):
                 scan_status(self.db, [self.pane], tracker)
         self.assertEqual(state.pane_status(self.db, self.pane), 'waiting')
+
+    def test_claude_tmux_input_dialog_with_blank_rows_overrides_native_activity(self):
+        self.pane.update(agent='claude', session_path=str(self.path), pane_title='Test')
+        self.append_claude('user', 1, message={'content': 'Task'})
+        dialog = 'Which option?\n❯ 1. First\n  2. Second\n'
+        dialog += 'Enter to select · ↑/↓ to navigate · Esc to cancel' + '\n' * 25
+        with patch('maixy.status.tmux') as capture:
+            capture.return_value.returncode = 0
+            capture.return_value.stdout = dialog
+            tracker = StatusTracker()
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'waiting')
+            # Repeated scans and a dashboard reload must keep it orange.
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'waiting')
+            tracker = StatusTracker()
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'waiting')
+            # Once answered, the live spinner restores blue, even before a
+            # new lifecycle event has arrived in the log.
+            capture.return_value.stdout = '✻ Pondering… (23s · ↓ 123 tokens)\n❯' + '\n' * 25
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+            self.append_claude('assistant', 2, message={'stop_reason': 'end_turn'})
+            capture.return_value.stdout = '❯' + '\n' * 25
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'done')
 
     def test_transient_codex_screen_wait_does_not_flash_orange(self):
         self.pane.update(kind='process', session_path=str(self.path), pane_title='Test')

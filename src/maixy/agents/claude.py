@@ -160,7 +160,7 @@ class Claude(Agent):
         return BackgroundTasks()
 
     def display_status(self, text, title=''):
-        lines = [line.strip() for line in text.splitlines()[-18:]]
+        lines = [line.strip() for line in text.rstrip().splitlines()[-18:]]
         footer = '\n'.join(lines)
         # Question dialogs can retain an activity spinner above their choices.
         # Require both selection UI and its keyboard hints, not question prose.

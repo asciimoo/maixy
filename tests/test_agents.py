@@ -170,7 +170,7 @@ class AgentTests(unittest.TestCase):
             for screen, expected, now in [('Ready>', 'idle', 0), ('Busy (esc to stop)', 'working', 1),
                                           ('Approve action?', 'waiting', 2), ('Ready>', 'waiting', 3),
                                           ('Ready>', 'done', 5)]:
-                with patch('maixy.status.host_screen', return_value=screen), \
+                with patch('maixy.status.host_screen', return_value=screen + '\n   ' * 25), \
                      patch('maixy.status.time.monotonic', return_value=now):
                     scan_status(db, [pane], tracker)
                 self.assertEqual(state.pane_status(db, pane), expected)

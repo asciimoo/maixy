@@ -112,7 +112,7 @@ class Codex(Agent):
         return paths
 
     def display_status(self, text, title=''):
-        lines = [line.strip() for line in text.splitlines()[-18:]]
+        lines = [line.strip() for line in text.rstrip().splitlines()[-18:]]
         # The live status header is customizable and may have an animated
         # bullet. Match its elapsed timer and interrupt affordance instead.
         if any(re.match(r'^\S.*\(\d+[hms](?:\s+\d+[hms])*\s*[•·]\s*(?:esc|ctrl.c) to interrupt(?:\)|$)', line, re.I)
