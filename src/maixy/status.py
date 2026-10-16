@@ -128,10 +128,14 @@ class SessionTail:
         self.last, self.initialized = latest, True
         return (latest if changed or initial else None), initial
 
-    def current(self):
+    def current(self, trackers=()):
         if self.last is None or self.background is None:
             return self.last
         status, stamp = self.last
+        completion = getattr(self.background, 'session_completion', None)
+        ended = completion(self.path, stamp, trackers) if completion is not None else None
+        if ended is not None:
+            status, stamp = 'done', ended
         if status not in ('working', 'waiting'):
             if self.background.active:
                 return 'working', max(self.background.active.values())
@@ -198,7 +202,7 @@ class StatusTracker:
             reconcile = getattr(background, 'reconcile', None)
             if reconcile is not None:
                 reconcile(backgrounds)
-        child_signals = [child.current() for child in children.values()]
+        child_signals = [child.current(backgrounds) for child in children.values()]
         activity = [signal for signal in child_signals if signal and signal[0] in ('working', 'waiting')]
         if tail.background is not None:
             activity.extend(('working', stamp) for stamp in tail.background.active.values())

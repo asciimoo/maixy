@@ -58,6 +58,9 @@ class Agent:
         observed task completion. Logs are replayed on initialization/reload.
         Optional reconcile(trackers) receives trackers for this parent and
         its linked children to resolve lifecycle events recorded across logs.
+        Optional session_completion(path, since, trackers) returns the first
+        explicit child completion timestamp at or after its latest activity,
+        or None. Child shell jobs are tracked independently of that completion.
         Track lifecycle metadata only, never commands or conversation content.
         """
         return None

@@ -607,6 +607,75 @@ class SessionTests(unittest.TestCase):
             scan_status(self.db, [self.pane], StatusTracker())
         self.assertEqual(state.pane_status(self.db, self.pane), 'unknown')
 
+    def test_claude_child_notification_finishes_stale_child_and_survives_reload(self):
+        self.pane.update(agent='claude', kind='process', session_path=str(self.path), pane_title='Test')
+        child_dir = self.path.parent / self.path.stem / 'subagents'
+        child_dir.mkdir(parents=True)
+        child = child_dir / 'agent-child.jsonl'
+        for ended in ('completed', 'failed', 'stopped', 'killed'):
+            for reload in (False, True):
+                with self.subTest(ended=ended, reload=reload), \
+                     patch('maixy.status.host_screen', return_value='❯'):
+                    self.path.write_text('')
+                    child.write_text('')
+                    self.db.execute('DELETE FROM events')
+                    self.db.commit()
+                    self.child_event(self.path, 'claude', 'done', 1)
+                    self.child_event(child, 'claude', 'working', 2)
+                    tracker = StatusTracker()
+                    scan_status(self.db, [self.pane], tracker)
+                    self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+                    self.append_claude('queue-operation', 3, operation='enqueue', content=
+                        '<task-notification><task-id>child</task-id><status>{}</status>'
+                        '</task-notification>'.format(ended))
+                    if reload:
+                        tracker = StatusTracker()
+                    scan_status(self.db, [self.pane], tracker)
+                    self.assertEqual(state.pane_status(self.db, self.pane), 'done')
+                    self.assertEqual(self.pane['background_count'], 0)
+                    self.db.execute('UPDATE events SET acknowledged=updated')
+                    self.db.commit()
+                    self.finish_shell('child', 4, ended)  # Duplicate delivery.
+                    for current in (tracker, StatusTracker()):
+                        scan_status(self.db, [self.pane], current)
+                        self.assertEqual(state.pane_status(self.db, self.pane), 'idle')
+                    # A later turn in the same child supersedes its old end.
+                    self.child_event(child, 'claude', 'working', 5)
+                    scan_status(self.db, [self.pane], tracker)
+                    self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+                    self.assertEqual(self.pane['background_count'], 1)
+
+    def test_claude_child_notification_preserves_shell_and_parent_activity(self):
+        self.pane.update(agent='claude', kind='process', session_path=str(self.path), pane_title='Test')
+        parent = self.path
+        child_dir = parent.parent / parent.stem / 'subagents'
+        child_dir.mkdir(parents=True)
+        child = child_dir / 'agent-child.jsonl'
+        self.child_event(parent, 'claude', 'done', 1)
+        self.path = child
+        self.start_shell('review', 2)
+        self.append_claude('assistant', 3, message={
+            'stop_reason': 'stop_sequence', 'content': [{'type': 'text', 'text': 'Stopped'}]})
+        self.path = parent
+        tracker = StatusTracker()
+        with patch('maixy.status.host_screen', return_value=None):
+            scan_status(self.db, [self.pane], tracker)
+            self.finish_shell('unrelated', 4)
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+            self.finish_shell('child', 5, 'failed')
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+            self.assertEqual(self.pane['background_count'], 1)
+            self.finish_shell('review', 6, 'killed')
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'done')
+            self.assertEqual(self.pane['background_count'], 0)
+            self.append_claude('assistant', 7, message={'stop_reason': 'tool_use'})
+            scan_status(self.db, [self.pane], tracker)
+            self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+            self.assertEqual(self.pane['background_count'], 0)
+
     def test_reload_does_not_recover_completion_from_unrelated_activity(self):
         self.pane.update(kind='process', session_path=str(self.path), pane_title='Test')
         self.child_event(self.path, 'codex', 'done', 3)

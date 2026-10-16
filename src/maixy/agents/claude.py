@@ -64,6 +64,7 @@ class BackgroundTasks:
     def __init__(self):
         self.active = {}
         self.completed = {}
+        self.completion_times = {}
         self.updated = 0
         self.stops = {}
 
@@ -74,6 +75,7 @@ class BackgroundTasks:
         # lives in a child. Retain completion metadata even without a local
         # start so linked trackers can reconcile it after reading their logs.
         self.completed[task] = max(self.completed.get(task, 0), stamp)
+        self.completion_times.setdefault(task, set()).add(stamp)
         if task in self.active and stamp >= self.active[task]:
             del self.active[task]
             self.updated = max(self.updated, stamp)
@@ -84,6 +86,17 @@ class BackgroundTasks:
                          if isinstance(tracker, BackgroundTasks)), default=0)
             if ended >= started:
                 self.finish(task, ended)
+
+    def session_completion(self, path, since, trackers):
+        # A stopped/failed subagent may never append a final lifecycle record
+        # to its own log. Claude reports its end using the agent ID in another
+        # linked log. Use the first end after its latest activity so duplicate
+        # notification delivery cannot restore an acknowledged completion.
+        if not path.stem.startswith('agent-'):
+            return None
+        task = path.stem[len('agent-'):]
+        return min((stamp for tracker in trackers if isinstance(tracker, BackgroundTasks)
+                    for stamp in tracker.completion_times.get(task, ()) if stamp >= since), default=None)
 
     def observe(self, obj, stamp):
         for task, status in task_notifications(obj):
