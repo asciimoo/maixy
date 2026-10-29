@@ -118,6 +118,21 @@ class EventTests(unittest.TestCase):
                     'type': 'assistant', 'message': {'stop_reason': 'end_turn', 'content': [{'type': block}]},
                 }), 'done')
 
+    def test_claude_turn_api_requests_start_work_before_assistant_output(self):
+        for source in ('repl_main_thread', 'agent:builtin:Explore', 'agent:custom:reviewer'):
+            with self.subTest(source=source):
+                self.assertEqual(event_status('claude', {
+                    'type': 'api-request', 'querySource': source,
+                }), 'working')
+        for source in ('title', 'compact', 'statusline', '', None, {}, 1):
+            with self.subTest(source=source):
+                self.assertIsNone(event_status('claude', {
+                    'type': 'api-request', 'querySource': source,
+                }))
+        self.assertIsNone(event_status('claude', {
+            'type': 'api-request-blob', 'querySource': 'repl_main_thread',
+        }))
+
     def test_claude_local_commands_do_not_start_assistant_turns(self):
         command = '<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>opus</command-args>'
         output = '<local-command-stdout>Set model to opus</local-command-stdout>'
@@ -1009,6 +1024,38 @@ class SessionTests(unittest.TestCase):
             self.append_claude('assistant', 4, message={'stop_reason': 'end_turn'})
             scan_status(self.db, [self.pane], tracker)
             self.assertEqual(state.pane_status(self.db, self.pane), 'done')
+
+    def test_claude_api_request_resumes_acknowledged_turn_before_output(self):
+        self.pane.update(agent='claude', kind='process', session_path=str(self.path), pane_title='Test')
+        for screen in (None, '❯'):
+            with self.subTest(screen=screen), patch('maixy.status.host_screen', return_value=screen):
+                self.path.write_text('')
+                self.db.execute('DELETE FROM events')
+                self.db.commit()
+                self.append_claude('user', 1, message={'content': 'Task'})
+                tracker = StatusTracker()
+                scan_status(self.db, [self.pane], tracker)
+                self.append_claude('assistant', 2, message={'stop_reason': 'end_turn'})
+                scan_status(self.db, [self.pane], tracker)
+                self.db.execute('UPDATE events SET acknowledged=updated')
+                self.db.commit()
+                self.assertEqual(state.pane_status(self.db, self.pane), 'idle')
+                # A handback is meta input; the API request confirms that the
+                # parent has resumed rather than merely saving a notification.
+                self.append_claude('user', 3, isMeta=True, turnOrigin='peer',
+                                   origin={'kind': 'peer'}, message={'content': 'Child report'})
+                self.append_claude('api-request', 4, querySource='repl_main_thread')
+                for current in (tracker, tracker, StatusTracker()):
+                    scan_status(self.db, [self.pane], current)
+                    self.assertEqual(state.pane_status(self.db, self.pane), 'working')
+                self.append_claude('assistant', 5, message={'stop_reason': 'end_turn'})
+                scan_status(self.db, [self.pane], tracker)
+                self.assertEqual(state.pane_status(self.db, self.pane), 'done')
+                self.db.execute('UPDATE events SET acknowledged=updated')
+                self.db.commit()
+                self.append_claude('api-request', 6, querySource='title')
+                scan_status(self.db, [self.pane], tracker)
+                self.assertEqual(state.pane_status(self.db, self.pane), 'idle')
 
     def test_unresolved_external_status_is_unknown(self):
         self.pane.update(kind='process', pane_title='Test', pane_current_path='/missing')

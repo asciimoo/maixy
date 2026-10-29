@@ -207,6 +207,13 @@ class Claude(Agent):
             return None
         kind, message = obj.get('type'), obj.get('message', {})
         content = message.get('content', '')
+        # A resumed turn may wait on the API before any assistant blocks are
+        # recorded, especially after a peer handback stored as a meta message.
+        # Auxiliary requests (titles, compaction, etc.) do not start a turn.
+        source = obj.get('querySource')
+        if kind == 'api-request' and isinstance(source, str) and \
+                (source == 'repl_main_thread' or source.startswith('agent:')):
+            return 'working'
         if kind == 'assistant' and isinstance(content, list) and any(
                 isinstance(part, dict) and part.get('type') == 'tool_use' and
                 part.get('name') == 'AskUserQuestion' for part in content):

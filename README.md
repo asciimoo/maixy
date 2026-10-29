@@ -448,6 +448,7 @@ Codex and Claude adapters read local lifecycle events without requiring hooks or
 - Claude child completion includes explicit turn-ending tool results such as `SubagentHandback`. Reloading recovers newer completions for sessions Maixy had already tracked as active.
 - Claude task notifications also finish matching subagents, including failed or stopped children whose own logs have no final lifecycle event. A resumed child or its unfinished shell jobs still keep the parent active.
 - Claude assistant activity and tool results return the key to `WORKING`, including automatic continuation after a background task without a new user prompt. Child completion cannot finish a parent that has resumed work.
+- Claude main-turn and subagent API requests show `WORKING` while waiting for the first assistant output, including continuations after a subagent handback. Auxiliary requests such as title generation do not start a turn.
 - Codex threads are matched by a unique thread name and working directory, or by session logs actually held open by a live Codex process. Internal subagent threads and archived/saved history are excluded.
 - Background `codex exec` sessions do not occupy keys, including detached workers whose original parent process has exited.
 - Agents already found in tmux are not added again as standalone processes. Process start times protect external assignments from PID reuse.
